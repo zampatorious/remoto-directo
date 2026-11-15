@@ -539,9 +539,7 @@
       if (IS_ANDROID_APP) try { AndroidBridge.requestMic(); } catch (e) { }
       await openMic();
       b.classList.add('on'); b.textContent = recMode ? '🔴 Grabando voz' : '🎙 Hablando…'; send({ t: 'talk', on: 1 });
-      toast(recMode ? 'Micrófono en calidad de estudio. Usa auriculares.' : 'Micrófono abierto: te escuchan en el PC');
-      if (recMode && !monCtx && headphones() === true) toggleMonitor(true);
-    } catch (e) { toast('No se pudo abrir el micrófono (' + e.name + ')'); }
+      toast(recMode ? 'Micrófono en calidad de estudio. Usa auriculares.' : 'Micrófono abierto: te escuchan en el PC');    } catch (e) { toast('No se pudo abrir el micrófono (' + e.name + ')'); }
   }
 
   // en modo grabación el micro va en bruto (sin cancelación de eco, ruido ni ganancia automática)
@@ -572,7 +570,7 @@
     if (recMode === on) return;
     recMode = on;
     $('monBtn').classList.toggle('hidden', !on && !monCtx);
-    toast(on ? '🔴 Modo grabación: ponte auriculares y pulsa 🎙 para cantar' : 'Modo grabación desactivado');
+    toast(on ? '🔴 Modo grabación: ponte auriculares, escucharás la mezcla del estudio. Pulsa 🎙 para grabar.' : 'Modo grabación desactivado');
     if (talkTrack) { try { await openMic(); $('talkBtn').textContent = on ? '🔴 Grabando voz' : '🎙 Hablando…'; } catch (e) { } }
   }
 
