@@ -20,8 +20,139 @@
   // volumen final: el tuyo × el que marca el estudio, y la música baja mientras el estudio habla
   function applyVolumes() {
     const v = +$('vol').value;
-    $('prog').volume = Math.min(1, v * progVol * (duck ? 0.25 : 1));
+    const pv = Math.min(1, v * progVol * (duck ? 0.25 : 1));
+    const fast = ultraProgActive();
+    // si llega el master por la vía rápida, suena esa; si no, la normal
+    $('prog').volume = fast ? 0 : pv;
+    if (plyOut && ctx) plyOut.gain.setTargetAtTime(fast ? pv : 0, ctx.currentTime, 0.02);
     if (talkOut && ctx) talkOut.gain.setTargetAtTime(v, ctx.currentTime, 0.02);
+  }
+
+  // ================= MODO LATENCIA ULTRABAJA =================
+  // Opus en paquetes de 5 ms por un canal directo sin reintentos (sin el búfer fijo de las llamadas).
+  // La vía normal sigue funcionando en paralelo como respaldo.
+  const ULTRA_US = 5000;
+  let ultraOn = false, ultraOk = null, ultraDc = null, ultraMod = null, ply = null, plyOut = null, sinkZero = null;
+  let progDec = null, progSeqLast = -1, lastUltraProg = 0;
+  const CLIENT_WORKLETS = `
+    class Ply extends AudioWorkletProcessor {
+      constructor(){ super(); this.n=1<<17; this.b=new Float32Array(this.n*2); this.w=0; this.r=0; this.prime=true;
+        this.start=Math.round(sampleRate*0.008); this.minF=1e9; this.win=0;
+        this.port.onmessage=e=>{ const f=e.data; for(let i=0;i<f.length;i+=2){ if(this.w-this.r>=this.n-8) break; const k=(this.w&(this.n-1))*2; this.b[k]=f[i]; this.b[k+1]=f[i+1]; this.w++; } }; }
+      process(_i,o){ const L=o[0][0], R=o[0][1]||o[0][0], q=L.length;
+        if(this.prime && this.w-this.r>=this.start) this.prime=false;
+        if(this.prime || this.w-this.r<q){ L.fill(0); R.fill(0);
+          if(!this.prime){ this.prime=true; this.start=Math.min(this.start+Math.round(sampleRate*0.003), sampleRate*0.08); } this.minF=0; }
+        else { for(let i=0;i<q;i++){ const k=((this.r+i)&(this.n-1))*2; L[i]=this.b[k]; R[i]=this.b[k+1]; } this.r+=q; this.minF=Math.min(this.minF,this.w-this.r); }
+        this.win+=q;
+        if(this.win>=sampleRate){ const safety=Math.round(sampleRate*0.002);
+          if(!this.prime && this.minF>safety+32) this.r+=this.minF-safety;
+          if(this.minF>0 && this.start>sampleRate*0.008) this.start-=Math.round(sampleRate*0.0005);
+          this.minF=1e9; this.win=0; }
+        return true; } }
+    class Cap extends AudioWorkletProcessor {
+      constructor(){ super(); this.on=false; this.port.onmessage=e=>{ this.on=!!e.data.on; }; }
+      process(i){ if(!this.on) return true; const c=i[0]&&i[0][0]; const f=new Float32Array(128); if(c) f.set(c); this.port.postMessage(f,[f.buffer]); return true; } }
+    registerProcessor('cr-ply', Ply); registerProcessor('cr-cap', Cap);`;
+
+  function encCfg(ch) {
+    return { codec: 'opus', sampleRate: 48000, numberOfChannels: ch, bitrate: ch === 1 ? 160000 : 256000,
+      opus: { frameDuration: ULTRA_US, complexity: 5, useinbandfec: false, usedtx: false, packetlossperc: 0 } };
+  }
+  async function checkUltra() {
+    if (ultraOk !== null) return ultraOk;
+    ultraOk = false;
+    try {
+      if (!('AudioEncoder' in window) || !('AudioDecoder' in window) || !('AudioWorkletNode' in window)) return false;
+      const a = await AudioEncoder.isConfigSupported(encCfg(1));
+      const b = await AudioDecoder.isConfigSupported({ codec: 'opus', sampleRate: 48000, numberOfChannels: 2 });
+      ultraOk = !!(a.supported && b.supported) && audioCtx().sampleRate === 48000;
+    } catch (e) { ultraOk = false; }
+    return ultraOk;
+  }
+  async function ensureUltraNodes() {
+    const c = audioCtx();
+    if (!ultraMod) ultraMod = c.audioWorklet.addModule(URL.createObjectURL(new Blob([CLIENT_WORKLETS], { type: 'application/javascript' })));
+    await ultraMod;
+    if (!ply) {
+      ply = new AudioWorkletNode(c, 'cr-ply', { numberOfInputs: 0, outputChannelCount: [2] });
+      plyOut = c.createGain(); plyOut.gain.value = 0; ply.connect(plyOut); plyOut.connect(c.destination);
+      sinkZero = c.createGain(); sinkZero.gain.value = 0; sinkZero.connect(c.destination);
+      if (progAn) ply.connect(progAn);
+    }
+  }
+  async function setupMicUltra(m) {
+    if (!ultraOk || !m.g) return;
+    await ensureUltraNodes();
+    if (!m.cap) {
+      m.cap = new AudioWorkletNode(ctx, 'cr-cap', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1, channelCountMode: 'explicit' });
+      m.g.connect(m.cap); m.cap.connect(sinkZero);
+      m.useq = 0; m.uts = 0;
+      m.enc = new AudioEncoder({ output: ch => sendUltraMic(m, ch), error: e => console.warn('codificador', e) });
+      m.enc.configure(encCfg(1));
+      m.cap.port.onmessage = e => {
+        if (!ultraOn || !m.enc || m.enc.state !== 'configured') return;
+        const ad = new AudioData({ format: 'f32-planar', sampleRate: ctx.sampleRate, numberOfFrames: e.data.length, numberOfChannels: 1, timestamp: m.uts, data: e.data });
+        m.uts += e.data.length * 1e6 / ctx.sampleRate;
+        try { m.enc.encode(ad); } catch (x) { }
+        ad.close();
+      };
+    }
+    m.cap.port.postMessage({ on: ultraOn });
+  }
+  function dropMicUltra(m) {
+    try { m.cap && m.cap.disconnect(); m.g && m.cap && m.g.disconnect(m.cap); } catch (e) { }
+    try { m.enc && m.enc.state !== 'closed' && m.enc.close(); } catch (e) { }
+    m.cap = null; m.enc = null;
+  }
+  function sendUltraMic(m, chunk) {
+    if (!ultraDc || ultraDc.readyState !== 'open' || !m.tr || !m.tr.mid) return;
+    if (ultraDc.bufferedAmount > 32768) return; // red atascada: mejor perder un paquete que acumular retraso
+    const b = new Uint8Array(8 + chunk.byteLength);
+    b[0] = 1; b[1] = Number(m.tr.mid) & 255;
+    new DataView(b.buffer).setUint32(4, (m.useq++) >>> 0, true);
+    chunk.copyTo(b.subarray(8));
+    ultraDc.send(b);
+  }
+  function onUltraMsg(ev) {
+    const b = new Uint8Array(ev.data);
+    if (b[0] !== 2 || b.length < 9 || !ply) return;
+    const seq = new DataView(ev.data).getUint32(4, true);
+    if (!progDec) {
+      progDec = new AudioDecoder({
+        output: ad => {
+          const n = ad.numberOfFrames, L = new Float32Array(n), R = new Float32Array(n);
+          ad.copyTo(L, { planeIndex: 0, format: 'f32-planar' });
+          if (ad.numberOfChannels > 1) ad.copyTo(R, { planeIndex: 1, format: 'f32-planar' }); else R.set(L);
+          ad.close();
+          const f = new Float32Array(n * 2);
+          for (let i = 0; i < n; i++) { f[2 * i] = L[i]; f[2 * i + 1] = R[i]; }
+          ply.port.postMessage(f, [f.buffer]);
+        },
+        error: e => { console.warn('decodificador', e); progDec = null; }
+      });
+      progDec.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 2 });
+      progSeqLast = -1;
+    }
+    if (progSeqLast >= 0) {
+      if (seq <= progSeqLast) return;                                       // llegó tarde: se descarta
+      const miss = Math.min(seq - progSeqLast - 1, 20);                     // perdidos: silencio del mismo largo
+      for (let k = 0; k < miss; k++) ply.port.postMessage(new Float32Array(240 * 2));
+    }
+    progSeqLast = seq;
+    const was = ultraProgActive();
+    lastUltraProg = performance.now();
+    if (!was) applyVolumes();
+    try { progDec.decode(new EncodedAudioChunk({ type: 'key', timestamp: seq * ULTRA_US, data: b.subarray(8) })); } catch (e) { }
+  }
+  function ultraProgActive() { return performance.now() - lastUltraProg < 400; }
+  setInterval(() => { if (plyOut) applyVolumes(); }, 300); // vuelve a la vía normal si deja de llegar
+  async function setUltra(on) {
+    await checkUltra();
+    ultraOn = !!on && ultraOk;
+    for (const m of mics) await setupMicUltra(m);
+    mics.forEach(m => m.cap && m.cap.port.postMessage({ on: ultraOn }));
+    send({ t: 'ultra', ok: ultraOk, on: ultraOn });
   }
   let connected = false, leaving = false, retries = 0;
   let negotiating = false, pendingNeg = false;
@@ -76,6 +207,7 @@
     try { t.contentHint = 'music'; } catch (e) { }
     if (cal && cal.mic === m) startCal(); // seguimos en calibración
     updateSender(m);
+    if (ultraOn) setupMicUltra(m);
   }
 
   // Lo que se envía: el micro TAL CUAL (menos retraso) salvo que haga falta procesarlo
@@ -101,6 +233,7 @@
     const i = mics.indexOf(m); if (i < 0) return;
     mics.splice(i, 1);
     if (m.stream) m.stream.getTracks().forEach(t => t.stop());
+    dropMicUltra(m);
     try { m.g.disconnect(); } catch (e) { }
     if (m.tr) { try { m.tr.stop(); } catch (e) { } negotiate(); }
     m.el.remove(); persistMics(); sendMics();
@@ -181,6 +314,7 @@
       case 'tb': tbOn = !!m.on; duck = !!m.on && m.duck !== false; $('tbBanner').classList.toggle('hidden', !m.on); applyVolumes(); break;
       case 'pv': progVol = Math.max(0, Math.min(2, +m.v || 0)); applyVolumes(); break;
       case 'cal': if (m.on) startCal(); else stopCal(); break;
+      case 'ultra': setUltra(!!m.on); break;
       case 'toast': toast(m.text); break;
       case 'bye': leaving = true; fail(m.text || 'El estudio ha cerrado la sesión.'); break;
     }
@@ -191,6 +325,10 @@
     progTr = pc.addTransceiver('audio', { direction: 'recvonly' });
     talkTr = pc.addTransceiver('audio', { direction: 'recvonly' });
     mics.forEach(m => { if (m.track) m.tr = pc.addTransceiver(sendTrack(m), { direction: 'sendonly' }); });
+    // canal directo para el modo de latencia ultrabaja (sin orden ni reintentos)
+    ultraDc = pc.createDataChannel('ultra', { ordered: false, maxRetransmits: 0 });
+    ultraDc.binaryType = 'arraybuffer';
+    ultraDc.onmessage = onUltraMsg;
     pc.onicecandidate = e => { if (e.candidate) send({ t: 'ice', c: e.candidate.toJSON() }); };
     pc.ontrack = e => {
       if (e.transceiver === talkTr) {
@@ -213,6 +351,7 @@
       const c = audioCtx();
       progSrc = c.createMediaStreamSource(progStream);
       progAn = c.createAnalyser(); progAn.fftSize = 1024; progSrc.connect(progAn);
+      if (ply) ply.connect(progAn);
     };
     pc.onconnectionstatechange = () => {
       const st = pc && pc.connectionState;
@@ -260,6 +399,8 @@
     progSrc.connect(m.dest);
     cal = { mic: m };
     updateSender(m); // durante la medición se envía la ruta procesada (la que lleva los clics)
+    // vía rápida: lo que llega por el reproductor rápido vuelve por el canal rápido del micro 1
+    if (m.cap && ply) { try { m.g.disconnect(m.cap); } catch (e) { } ply.connect(m.cap); cal.fast = true; }
     toast('Midiendo el retraso… (oirás unos clics)', 4000);
   }
   function stopCal() {
@@ -267,6 +408,7 @@
     try { progSrc.disconnect(cal.mic.dest); } catch (e) { }
     progSrc.connect(progAn);
     try { cal.mic.g.connect(cal.mic.dest); } catch (e) { }
+    if (cal.fast && cal.mic.cap) { try { ply.disconnect(cal.mic.cap); } catch (e) { } try { cal.mic.g.connect(cal.mic.cap); } catch (e) { } }
     const m = cal.mic; cal = null;
     updateSender(m);
   }
@@ -310,9 +452,12 @@
     try { pc && pc.close(); } catch (e) { }
     try { peer && peer.destroy(); } catch (e) { }
     conn = pc = peer = null; progTr = talkTr = null; negotiating = false; pendingNeg = false;
+    ultraDc = null; lastUltraProg = 0; progSeqLast = -1;
+    try { progDec && progDec.state !== 'closed' && progDec.close(); } catch (e) { }
+    progDec = null;
     mics.forEach(m => m.tr = null);
     if (full) {
-      mics.forEach(m => m.stream && m.stream.getTracks().forEach(t => t.stop()));
+      mics.forEach(m => { m.stream && m.stream.getTracks().forEach(t => t.stop()); dropMicUltra(m); });
       mics.length = 0; $('mics').innerHTML = '';
       $('prog').srcObject = null;
     }
