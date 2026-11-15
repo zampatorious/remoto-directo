@@ -15,7 +15,14 @@
   $('name').value = S.name || '';
 
   // ---------- estado ----------
-  let peer = null, conn = null, pc = null, progTr = null, progStream = null, ctx = null;
+  let peer = null, conn = null, pc = null, progTr = null, talkTr = null, progStream = null, ctx = null;
+  let talkOut = null, tbOn = false, duck = false, progVol = 1;
+  // volumen final: el tuyo × el que marca el estudio, y la música baja mientras el estudio habla
+  function applyVolumes() {
+    const v = +$('vol').value;
+    $('prog').volume = Math.min(1, v * progVol * (duck ? 0.25 : 1));
+    if (talkOut && ctx) talkOut.gain.setTargetAtTime(v, ctx.currentTime, 0.02);
+  }
   let connected = false, leaving = false, retries = 0;
   let negotiating = false, pendingNeg = false;
   const mics = [];             // {id, name, deviceId, ch, gain, muted, stream, src, split, g, an, dest, track, tr, el}
@@ -159,7 +166,8 @@
         }
         break;
       case 'ice': try { await pc.addIceCandidate(m.c); } catch (e) { } break;
-      case 'tb': $('tbBanner').classList.toggle('hidden', !m.on); break;
+      case 'tb': tbOn = !!m.on; duck = !!m.on && m.duck !== false; $('tbBanner').classList.toggle('hidden', !m.on); applyVolumes(); break;
+      case 'pv': progVol = Math.max(0, Math.min(2, +m.v || 0)); applyVolumes(); break;
       case 'cal': if (m.on) startCal(); else stopCal(); break;
       case 'toast': toast(m.text); break;
       case 'bye': leaving = true; fail(m.text || 'El estudio ha cerrado la sesión.'); break;
@@ -169,9 +177,20 @@
   async function startRtc() {
     pc = new RTCPeerConnection({ iceServers: CR.iceServers(S), bundlePolicy: 'max-bundle' });
     progTr = pc.addTransceiver('audio', { direction: 'recvonly' });
+    talkTr = pc.addTransceiver('audio', { direction: 'recvonly' });
     mics.forEach(m => { if (m.track) m.tr = pc.addTransceiver(m.track, { direction: 'sendonly' }); });
     pc.onicecandidate = e => { if (e.candidate) send({ t: 'ice', c: e.candidate.toJSON() }); };
     pc.ontrack = e => {
+      if (e.transceiver === talkTr) {
+        try { e.receiver.jitterBufferTarget = 20; } catch (x) { }
+        const st = new MediaStream([e.track]);
+        const el = $('talkEl'); el.muted = true; el.srcObject = st; el.play().catch(() => { }); // para que fluya a WebAudio
+        const c = audioCtx();
+        if (!talkOut) { talkOut = c.createGain(); talkOut.connect(c.destination); }
+        c.createMediaStreamSource(st).connect(talkOut);
+        applyVolumes();
+        return;
+      }
       if (e.transceiver !== progTr) return;
       try { e.receiver.jitterBufferTarget = S.buf != null ? S.buf : 30; } catch (x) { }
       progStream = new MediaStream([e.track]);
@@ -200,7 +219,7 @@
       const offer = await pc.createOffer();
       offer.sdp = CR.tuneSdp(offer.sdp);
       await pc.setLocalDescription(offer);
-      send({ t: 'sdp', type: 'offer', sdp: pc.localDescription.sdp, prog: progTr.mid });
+      send({ t: 'sdp', type: 'offer', sdp: pc.localDescription.sdp, prog: progTr.mid, talk: talkTr.mid });
       sendMics();
     } catch (e) { negotiating = false; console.warn(e); }
   }
@@ -245,7 +264,7 @@
     try {
       const st = await pc.getStats(); let jb = 0, rtt = 0;
       st.forEach(r => {
-        if (r.type === 'inbound-rtp' && r.kind === 'audio' && r.jitterBufferEmittedCount) {
+        if (r.type === 'inbound-rtp' && r.kind === 'audio' && r.jitterBufferEmittedCount && progTr && r.mid === progTr.mid) {
           const dd = r.jitterBufferDelay - jbPrev.d, dc = r.jitterBufferEmittedCount - jbPrev.c;
           if (dc > 0) jb = dd / dc * 1000;
           jbPrev = { d: r.jitterBufferDelay, c: r.jitterBufferEmittedCount };
@@ -276,7 +295,7 @@
     try { conn && conn.close(); } catch (e) { }
     try { pc && pc.close(); } catch (e) { }
     try { peer && peer.destroy(); } catch (e) { }
-    conn = pc = peer = null; progTr = null; negotiating = false; pendingNeg = false;
+    conn = pc = peer = null; progTr = talkTr = null; negotiating = false; pendingNeg = false;
     mics.forEach(m => m.tr = null);
     if (full) {
       mics.forEach(m => m.stream && m.stream.getTracks().forEach(t => t.stop()));
@@ -307,7 +326,7 @@
 
   $('addMic').onclick = () => addMic();
   $('leaveBtn').onclick = () => { leaving = true; send({ t: 'bye' }); setTimeout(() => fail(''), 100); setJoin('Has salido del estudio.'); };
-  $('vol').oninput = () => { $('prog').volume = +$('vol').value; };
+  $('vol').oninput = applyVolumes;
   $('selfMon').onchange = () => { audioCtx(); monGain.gain.setTargetAtTime($('selfMon').checked ? 1 : 0, ctx.currentTime, 0.01); };
 
   async function loadOutputs() {
@@ -316,7 +335,10 @@
     const { outs } = await devices();
     $('outDev').innerHTML = outs.map(d => `<option value="${d.deviceId}">${(d.label || 'Salida').replace(/</g, '&lt;')}</option>`).join('');
     if (S.outDev) $('outDev').value = S.outDev;
-    $('outDev').onchange = () => { S.outDev = $('outDev').value; save(); a.setSinkId(S.outDev).catch(() => { }); };
+    $('outDev').onchange = () => {
+      S.outDev = $('outDev').value; save(); a.setSinkId(S.outDev).catch(() => { });
+      if (ctx && ctx.setSinkId) ctx.setSinkId(S.outDev === 'default' ? '' : S.outDev).catch(() => { }); // talkback y escucha propia
+    };
   }
   navigator.mediaDevices && navigator.mediaDevices.addEventListener && navigator.mediaDevices.addEventListener('devicechange', () => {
     loadOutputs();
