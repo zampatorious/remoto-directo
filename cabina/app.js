@@ -72,8 +72,19 @@
     if (m.ch === 'mix' || chans < 2) { m.src.connect(m.g); m.split = null; }
     else { m.split = c.createChannelSplitter(2); m.src.connect(m.split); m.split.connect(m.g, Number(m.ch) || 0); }
     m.g.gain.value = m.muted ? 0 : m.gain;
+    m.raw = t;
+    try { t.contentHint = 'music'; } catch (e) { }
     if (cal && cal.mic === m) startCal(); // seguimos en calibración
+    updateSender(m);
   }
+
+  // Lo que se envía: el micro TAL CUAL (menos retraso) salvo que haga falta procesarlo
+  // (ganancia distinta de 100 %, un solo canal, silenciado o midiendo el retraso).
+  function sendTrack(m) {
+    const direct = m.raw && m.raw.readyState === 'live' && m.ch === 'mix' && Math.abs(m.gain - 1) < 0.01 && !m.muted && !(cal && cal.mic === m);
+    return direct ? m.raw : m.track;
+  }
+  function updateSender(m) { if (m.tr && !m.tr.stopped) m.tr.sender.replaceTrack(sendTrack(m)).catch(() => { }); }
 
   function micLabel(i) { return 'Micrófono ' + (i + 1); }
 
@@ -82,7 +93,7 @@
     mics.push(m);
     renderMic(m);
     try { await buildMic(m); } catch (e) { toast('No se pudo abrir el micrófono: ' + e.name); }
-    if (pc) { m.tr = pc.addTransceiver(m.track, { direction: 'sendonly' }); negotiate(); }
+    if (pc) { m.tr = pc.addTransceiver(sendTrack(m), { direction: 'sendonly' }); negotiate(); }
     persistMics();
   }
 
@@ -108,10 +119,11 @@
     nm.onchange = () => { m.name = nm.value.trim() || micLabel(mics.indexOf(m)); nm.value = m.name; persistMics(); sendMics(); };
     dev.onchange = async () => { m.deviceId = dev.value; persistMics(); try { await buildMic(m); } catch (e) { toast('No se pudo abrir: ' + e.name); } };
     ch.onchange = async () => { m.ch = ch.value; persistMics(); await buildMic(m); };
-    gn.oninput = () => { m.gain = +gn.value; if (!m.muted) m.g.gain.setTargetAtTime(m.gain, ctx.currentTime, 0.01); persistMics(); };
+    gn.oninput = () => { m.gain = +gn.value; if (!m.muted) m.g.gain.setTargetAtTime(m.gain, ctx.currentTime, 0.01); persistMics(); updateSender(m); };
     el.querySelector('.mute').onclick = e => {
       m.muted = !m.muted; e.target.textContent = m.muted ? '🔇' : '🔊'; el.classList.toggle('muted', m.muted);
       m.g.gain.setTargetAtTime(m.muted ? 0 : m.gain, ctx.currentTime, 0.01);
+      updateSender(m);
     };
     el.querySelector('.del').onclick = () => removeMic(m);
   }
@@ -178,7 +190,7 @@
     pc = new RTCPeerConnection({ iceServers: CR.iceServers(S), bundlePolicy: 'max-bundle' });
     progTr = pc.addTransceiver('audio', { direction: 'recvonly' });
     talkTr = pc.addTransceiver('audio', { direction: 'recvonly' });
-    mics.forEach(m => { if (m.track) m.tr = pc.addTransceiver(m.track, { direction: 'sendonly' }); });
+    mics.forEach(m => { if (m.track) m.tr = pc.addTransceiver(sendTrack(m), { direction: 'sendonly' }); });
     pc.onicecandidate = e => { if (e.candidate) send({ t: 'ice', c: e.candidate.toJSON() }); };
     pc.ontrack = e => {
       if (e.transceiver === talkTr) {
@@ -192,7 +204,7 @@
         return;
       }
       if (e.transceiver !== progTr) return;
-      try { e.receiver.jitterBufferTarget = S.buf != null ? S.buf : 30; } catch (x) { }
+      try { e.receiver.jitterBufferTarget = S.buf != null ? S.buf : 0; } catch (x) { } // mínimo que permita la red
       progStream = new MediaStream([e.track]);
       const a = $('prog'); a.srcObject = progStream; a.volume = +$('vol').value;
       if (S.outDev && a.setSinkId) a.setSinkId(S.outDev).catch(() => { });
@@ -247,6 +259,7 @@
     try { m.g.disconnect(m.dest); } catch (e) { }
     progSrc.connect(m.dest);
     cal = { mic: m };
+    updateSender(m); // durante la medición se envía la ruta procesada (la que lleva los clics)
     toast('Midiendo el retraso… (oirás unos clics)', 4000);
   }
   function stopCal() {
@@ -254,7 +267,8 @@
     try { progSrc.disconnect(cal.mic.dest); } catch (e) { }
     progSrc.connect(progAn);
     try { cal.mic.g.connect(cal.mic.dest); } catch (e) { }
-    cal = null;
+    const m = cal.mic; cal = null;
+    updateSender(m);
   }
 
   // ---------- estadísticas para el estudio ----------

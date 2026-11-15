@@ -85,14 +85,22 @@
     const opus = new Set();
     lines.forEach(l => { const m = l.match(/^a=rtpmap:(\d+) opus\/48000\/2/i); if (m) opus.add(m[1]); });
     const want = { stereo: '1', 'sprop-stereo': '1', maxaveragebitrate: '510000', maxplaybackrate: '48000', useinbandfec: '1', minptime: '10', usedtx: '0', cbr: '0' };
-    return lines.map(l => {
+    const out = [];
+    let inAudio = false, hasPtime = false;
+    const closeSection = () => { if (inAudio && !hasPtime) out.push('a=ptime:10'); };
+    for (const l of lines) {
+      if (l.startsWith('m=')) { closeSection(); inAudio = l.startsWith('m=audio'); hasPtime = false; }
+      if (inAudio && l.startsWith('a=ptime:')) { out.push('a=ptime:10'); hasPtime = true; continue; } // paquetes de 10 ms
       const m = l.match(/^a=fmtp:(\d+) (.*)$/);
-      if (!m || !opus.has(m[1])) return l;
+      if (!m || !opus.has(m[1])) { out.push(l); continue; }
       const o = {};
       m[2].split(';').forEach(kv => { const [k, v] = kv.split('='); if (k) o[k.trim()] = (v || '').trim(); });
       Object.assign(o, want);
-      return 'a=fmtp:' + m[1] + ' ' + Object.entries(o).map(([k, v]) => k + '=' + v).join(';');
-    }).join('\r\n');
+      out.push('a=fmtp:' + m[1] + ' ' + Object.entries(o).map(([k, v]) => k + '=' + v).join(';'));
+    }
+    // la última línea del SDP es vacía (termina en \r\n): la sección final se cierra antes de ella
+    if (out.length && out[out.length - 1] === '') { out.pop(); closeSection(); out.push(''); } else closeSection();
+    return out.join('\r\n');
   }
 
   function PeerCtor() { return g.Peer || (g.peerjs && g.peerjs.Peer); }
