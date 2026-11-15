@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0d1117">
+<title>Remoto Directo</title>
+<link rel="stylesheet" href="style.css">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.png">
+</head>
+<body>
+
+<!-- ========== Pantalla de conexión ========== -->
+<section id="login" class="screen">
+  <div class="card">
+    <div class="brand"><span class="logo">◧</span> Remoto Directo</div>
+    <p class="sub">Controla tu PC desde cualquier sitio, sin IPs.</p>
+
+    <div id="inviteBox" class="invite hidden">
+      Te han invitado a controlar <b id="inviteUser"></b>.
+    </div>
+
+    <div id="credBox">
+      <label>Usuario del PC
+        <input id="user" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="ej. casa-juan">
+      </label>
+      <label>Contraseña
+        <input id="pass" type="password" autocomplete="current-password">
+      </label>
+      <label class="row"><input type="checkbox" id="remember" checked> Recordar en este dispositivo</label>
+    </div>
+
+    <button id="connectBtn" class="primary">Conectar</button>
+    <div id="loginStatus" class="status"></div>
+
+    <details class="adv">
+      <summary>Opciones avanzadas</summary>
+      <label>Calidad inicial
+        <select id="quality">
+          <option value="lat">Mínima latencia · 720p 60fps</option>
+          <option value="bal" selected>Equilibrado · 1080p 60fps</option>
+          <option value="max">Máxima calidad · nativa 60fps</option>
+          <option value="mob">Datos móviles · 720p 30fps</option>
+        </select>
+      </label>
+      <label>Códec preferido
+        <select id="codec">
+          <option value="H264" selected>H.264 (hardware, recomendado)</option>
+          <option value="VP8">VP8</option>
+          <option value="VP9">VP9</option>
+          <option value="AV1">AV1</option>
+          <option value="auto">Automático</option>
+        </select>
+      </label>
+      <label>Servidor de señalización propio (vacío = público)
+        <input id="sigHost" placeholder="mi-servidor.com" autocapitalize="none">
+      </label>
+      <label>TURN propio (opcional)
+        <input id="turnUrl" placeholder="turn:mi-turn.com:3478" autocapitalize="none">
+      </label>
+      <div class="two">
+        <input id="turnUser" placeholder="usuario TURN" autocapitalize="none">
+        <input id="turnPass" placeholder="clave TURN" type="password">
+      </div>
+    </details>
+  </div>
+</section>
+
+<!-- ========== Sesión remota ========== -->
+<section id="session" class="screen hidden">
+  <div id="stage">
+    <video id="video" autoplay playsinline muted></video>
+  </div>
+  <audio id="audio" autoplay></audio>
+  <div id="touch"></div>
+  <div id="cursorDot" class="hidden"></div>
+  <div id="stats" class="hidden"></div>
+  <div id="toast" class="hidden"></div>
+
+  <!-- entrada de texto oculta para el teclado del móvil -->
+  <textarea id="kbd" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
+
+  <button id="fab" title="Menú">☰</button>
+  <div id="menu" class="hidden">
+    <div class="menu-row">
+      <button data-act="mode" id="modeBtn">👆 Táctil</button>
+      <button data-act="kbd">⌨ Teclado</button>
+      <button data-act="keys">⌘ Teclas</button>
+    </div>
+    <div class="menu-row">
+      <button data-act="screens">🖥 Pantalla</button>
+      <button data-act="quality">⚙ Calidad</button>
+      <button data-act="stats">📶 Estado</button>
+    </div>
+    <div class="menu-row">
+      <button data-act="talk" id="talkBtn">🎙 Hablar</button>
+      <button data-act="sound" id="soundBtn">🔊 Sonido</button>
+      <button data-act="abuf">⏱ Búfer audio</button>
+    </div>
+    <div class="menu-row">
+      <button data-act="mon" id="monBtn" class="hidden">🎧 Escucharme</button>
+    </div>
+    <div class="menu-row">
+      <button data-act="zoom">🔍 Ajustar</button>
+      <button data-act="full">⛶ Completa</button>
+      <button data-act="quit" class="danger">✕ Salir</button>
+    </div>
+    <div id="sub" class="sub-panel hidden"></div>
+  </div>
+
+  <div id="keybar" class="hidden">
+    <button data-sc="esc">Esc</button>
+    <button data-sc="tab">Tab</button>
+    <button data-mod="ctrl">Ctrl</button>
+    <button data-mod="alt">Alt</button>
+    <button data-mod="shift">Shift</button>
+    <button data-mod="win">Win</button>
+    <button data-sc="left">←</button>
+    <button data-sc="up">↑</button>
+    <button data-sc="down">↓</button>
+    <button data-sc="right">→</button>
+    <button data-sc="del">Supr</button>
+    <button data-sc="home">Inicio</button>
+    <button data-sc="end">Fin</button>
+    <button data-sc="pgup">RePág</button>
+    <button data-sc="pgdn">AvPág</button>
+    <button data-combo="ctrl+c">Copiar</button>
+    <button data-combo="ctrl+v">Pegar</button>
+    <button data-combo="ctrl+z">Deshacer</button>
+    <button data-combo="alt+tab">Alt+Tab</button>
+    <button data-combo="win+d">Escritorio</button>
+    <button data-combo="ctrl+shift+esc">Tareas</button>
+    <button data-sc="f5">F5</button>
+    <button data-combo="alt+f4">Alt+F4</button>
+  </div>
+</section>
+
+<script src="peerjs.min.js"></script>
+<script src="common.js"></script>
+<script src="client.js"></script>
+</body>
+</html>
