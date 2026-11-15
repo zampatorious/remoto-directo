@@ -540,13 +540,23 @@
       await openMic();
       b.classList.add('on'); b.textContent = recMode ? '🔴 Grabando voz' : '🎙 Hablando…'; send({ t: 'talk', on: 1 });
       toast(recMode ? 'Micrófono en calidad de estudio. Usa auriculares.' : 'Micrófono abierto: te escuchan en el PC');
-      if (recMode && !monCtx) toggleMonitor(true);
+      if (recMode && !monCtx && headphones() === true) toggleMonitor(true);
     } catch (e) { toast('No se pudo abrir el micrófono (' + e.name + ')'); }
   }
 
   // en modo grabación el micro va en bruto (sin cancelación de eco, ruido ni ganancia automática)
+  // ¿hay auriculares? true / false / null (desconocido, p. ej. en navegador)
+  function headphones() {
+    if (IS_ANDROID_APP) { try { return !!AndroidBridge.hasHeadphones(); } catch (e) { } }
+    return null;
+  }
+
   async function openMic() {
-    const c = recMode
+    const hp = headphones();
+    // sin auriculares el altavoz se mete en el micro: mantenemos la cancelación de eco aunque estemos grabando
+    const raw = recMode && hp !== false;
+    if (recMode && hp === false) toast('Sin auriculares: activo la cancelación de eco para evitar acoples. Conecta auriculares para calidad de estudio.');
+    const c = raw
       ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1, sampleRate: 48000, latency: 0 }
       : { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
     const s = await navigator.mediaDevices.getUserMedia({ audio: c });
@@ -570,6 +580,7 @@
   let monCtx = null;
   function toggleMonitor(on) {
     if (on === undefined) on = !monCtx;
+    if (on && headphones() === false) { toast('Conecta auriculares para escucharte: por el altavoz se acopla.'); on = false; }
     if (monCtx) { monCtx.close(); monCtx = null; }
     if (on && talkTrack) {
       monCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 0 });
