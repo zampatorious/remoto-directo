@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f0f12">
+<title>Cabina Remota</title>
+<link rel="icon" href="icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Entrada -->
+<section id="join" class="screen">
+  <div class="card narrow">
+    <div class="brand"><span class="dot"></span> Cabina Remota</div>
+    <p class="sub" id="joinSub">Graba desde donde estés, directo al estudio.</p>
+
+    <div id="manual" class="hidden">
+      <label>Estudio<input id="mStudio" autocapitalize="none" spellcheck="false"></label>
+      <label>Código de invitación<input id="mCode" autocapitalize="none" spellcheck="false"></label>
+    </div>
+
+    <label>Tu nombre
+      <input id="name" placeholder="ej. Laura" autocomplete="name">
+    </label>
+    <button id="joinBtn" class="primary">Entrar al estudio</button>
+    <p class="fine">Ponte <b>auriculares</b>. Te pediremos permiso para usar el micrófono.</p>
+    <div id="joinStatus" class="status"></div>
+  </div>
+</section>
+
+<!-- Sesión -->
+<section id="room" class="screen hidden">
+  <header class="bar">
+    <div class="brand small"><span class="dot live"></span> <span id="studioName">Estudio</span></div>
+    <div id="conn" class="pill">Conectando…</div>
+    <button id="leaveBtn" class="ghost danger">Salir</button>
+  </header>
+
+  <main class="wrap">
+    <div id="tbBanner" class="banner hidden">🎙 El estudio te está hablando</div>
+
+    <section class="card">
+      <div class="row between">
+        <h2>Lo que escuchas del estudio</h2>
+        <span id="lat" class="muted small"></span>
+      </div>
+      <div class="meter big"><i id="progMeter"></i></div>
+      <div class="row">
+        <label class="grow">Volumen
+          <input type="range" id="vol" min="0" max="1" step="0.01" value="1">
+        </label>
+        <label class="grow" id="outWrap">Salida
+          <select id="outDev"></select>
+        </label>
+      </div>
+      <label class="check"><input type="checkbox" id="selfMon"> Oír también mi voz directa (sin retraso, sin efectos)</label>
+    </section>
+
+    <section class="card">
+      <div class="row between">
+        <h2>Mis micrófonos</h2>
+        <button id="addMic" class="primary sm">+ Añadir micrófono</button>
+      </div>
+      <p class="muted small">Cada micrófono llega al estudio como una pista distinta.</p>
+      <div id="mics"></div>
+    </section>
+  </main>
+  <div id="toast" class="toast hidden"></div>
+  <audio id="prog" autoplay playsinline></audio>
+</section>
+
+<template id="micTpl">
+  <div class="mic">
+    <div class="row">
+      <input class="mname grow" maxlength="30">
+      <button class="mute ghost sm" title="Silenciar">🔊</button>
+      <button class="del ghost sm danger" title="Quitar">✕</button>
+    </div>
+    <div class="row">
+      <select class="mdev grow"></select>
+      <select class="mch">
+        <option value="mix">Mono (todo)</option>
+        <option value="0">Canal 1</option>
+        <option value="1">Canal 2</option>
+      </select>
+    </div>
+    <div class="row">
+      <div class="meter grow"><i></i></div>
+      <input type="range" class="mgain" min="0" max="2" step="0.01" value="1" title="Ganancia">
+    </div>
+  </div>
+</template>
+
+<script src="peerjs.min.js"></script>
+<script src="common.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
