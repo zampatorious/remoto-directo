@@ -263,6 +263,24 @@
     return navigator.mediaDevices.getUserMedia({ audio: c });
   }
 
+  // Varios micros del MISMO dispositivo (p. ej. canales 1, 3 y 4 de una mesa) comparten UNA sola captura:
+  // abrirlo varias veces multiplica la carga y producía tirones.
+  const streams = new Map(); // clave -> {p: Promise<MediaStream>, refs}
+  function streamKey(m) { return (m.deviceId || 'default') + '|' + ((S.phones || m.ch !== 'mix') ? 'raw' : 'aec'); }
+  async function acquireStream(m) {
+    const key = streamKey(m);
+    let e = streams.get(key);
+    if (!e) { e = { p: openMicStream(m), refs: 0 }; streams.set(key, e); e.p.catch(() => streams.delete(key)); }
+    const s = await e.p;
+    e.refs++; m.streamKey = key;
+    return s;
+  }
+  function releaseStream(m) {
+    const key = m.streamKey; m.streamKey = null; m.stream = null;
+    const e = key && streams.get(key); if (!e) return;
+    if (--e.refs <= 0) { streams.delete(key); e.p.then(s => s.getTracks().forEach(t => t.stop())).catch(() => { }); }
+  }
+
   // Cada micro: fuente -> (canal elegido) -> ganancia -> destino mono (pista que se envía)
   async function buildMic(m) {
     const c = audioCtx();
@@ -273,9 +291,10 @@
       m.g.connect(m.an); m.g.connect(m.dest); m.g.connect(monGain);
       m.track = m.dest.stream.getAudioTracks()[0];
     }
-    if (m.stream) m.stream.getTracks().forEach(t => t.stop());
     try { m.src && m.src.disconnect(); m.split && m.split.disconnect(); } catch (e) { }
-    m.stream = await openMicStream(m);
+    const prevKey = m.streamKey, prev = { streamKey: prevKey };
+    m.stream = await acquireStream(m);
+    if (prevKey) releaseStream(prev); // suelta la anterior después de coger la nueva (si es la misma, sigue abierta)
     const t = m.stream.getAudioTracks()[0];
     let chans = (t.getSettings && t.getSettings().channelCount) || 1;
     m.src = c.createMediaStreamSource(m.stream);
@@ -364,7 +383,8 @@
   function removeMic(m) {
     const i = mics.indexOf(m); if (i < 0) return;
     mics.splice(i, 1);
-    if (m.stream) m.stream.getTracks().forEach(t => t.stop());
+    releaseStream(m);
+    try { m.src && m.src.disconnect(); m.scanSplit && m.scanSplit.disconnect(); } catch (e) { }
     dropMicUltra(m);
     try { m.g.disconnect(); } catch (e) { }
     if (m.tr) { try { m.tr.stop(); } catch (e) { } negotiate(); }
@@ -621,7 +641,7 @@
     progDec = null;
     mics.forEach(m => m.tr = null);
     if (full) {
-      mics.forEach(m => { m.stream && m.stream.getTracks().forEach(t => t.stop()); dropMicUltra(m); });
+      mics.forEach(m => { releaseStream(m); dropMicUltra(m); });
       mics.length = 0; $('mics').innerHTML = '';
       $('progEl').srcObject = null; $('talkEl').srcObject = null;
     }
