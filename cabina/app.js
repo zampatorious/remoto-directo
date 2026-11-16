@@ -584,13 +584,22 @@
   const rdTxt = () => { $('rdTxt').textContent = S.retDelay + ' ms'; };
   const phonesUi = () => {
     $('phones').checked = !!S.phones;
-    $('selfMon').disabled = !S.phones; if (!S.phones) $('selfMon').checked = false;
+    $('selfMon').checked = !!(S.selfMon && S.phones);
     $('phonesHint').classList.toggle('hidden', !!S.phones);
   };
   $('selfMon').checked = !!S.selfMon; $('monVol').value = S.monVol; $('retDelay').value = S.retDelay; rdTxt(); phonesUi();
-  $('selfMon').onchange = () => { audioCtx(); S.selfMon = $('selfMon').checked && !!S.phones; save(); applyMon(); };
+  // Oírse en directo solo tiene sentido con auriculares (sin ellos se acopla): al activarlo se marca también esa casilla.
+  $('selfMon').onchange = async () => {
+    audioCtx();
+    S.selfMon = $('selfMon').checked; save();
+    if (S.selfMon && !S.phones) {
+      toast('Activado «Llevo auriculares»: ponte auriculares o se acoplará', 5000);
+      $('phones').checked = true; await $('phones').onchange();
+    }
+    applyMon();
+  };
   $('phones').onchange = async () => {
-    S.phones = $('phones').checked; if (!S.phones) S.selfMon = false;
+    S.phones = $('phones').checked; if (!S.phones) S.selfMon = false; else if ($('selfMon').checked) S.selfMon = true;
     save(); phonesUi(); if (ctx) { applyMon(); applyVolumes(); }
     for (const m of mics) { try { await buildMic(m); } catch (e) { toast('No se pudo abrir el micrófono: ' + e.name); } }
   };
