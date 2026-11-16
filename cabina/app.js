@@ -37,13 +37,13 @@
   function buildGraph(c) {
     outBus = c.createGain();
     // escucha directa del propio micro (latencia cero de red)
-    monGain = c.createGain(); monGain.gain.value = S.selfMon ? S.monVol : 0; monGain.connect(outBus);
+    monGain = c.createGain(); monGain.gain.value = S.selfMon && S.phones ? S.monVol : 0; monGain.connect(outBus);
     // retorno del master: un retardo por vía (normal / rápida) para no mezclar sus tiempos al medir
     retDelayN = c.createDelay(1); retDelayF = c.createDelay(1);
     selN = c.createGain(); selF = c.createGain(); selF.gain.value = 0;
     retDelayN.connect(selN); retDelayF.connect(selF);
     retSum = c.createGain(); selN.connect(retSum); selF.connect(retSum);
-    progAn = c.createAnalyser(); progAn.fftSize = 1024; retSum.connect(progAn);
+    progAn = c.createAnalyser(); progAn.fftSize = 1024; retDelayN.connect(progAn); retDelayF.connect(progAn);
     retGain = c.createGain();
     retComp = c.createDynamicsCompressor(); // limita el retorno para que no sature
     retComp.threshold.value = -3; retComp.knee.value = 3; retComp.ratio.value = 20;
@@ -67,6 +67,7 @@
     if (!outBus) return;
     const dev = S.outDev && S.outDev !== 'default' ? S.outDev : '';
     const a = $('prog');
+    for (const el of [$('progEl'), $('talkEl')]) if (el.setSinkId) el.setSinkId(dev).catch(() => { }); // modo sin auriculares
     try { outBus.disconnect(); } catch (e) { }
     if (!dev || ctx.setSinkId) {
       outBus.connect(ctx.destination);
@@ -80,18 +81,24 @@
   }
   function applyMon() {
     if (!monGain) return;
-    monGain.gain.setTargetAtTime(S.selfMon ? S.monVol : 0, ctx.currentTime, 0.01);
+    monGain.gain.setTargetAtTime(S.selfMon && S.phones ? S.monVol : 0, ctx.currentTime, 0.01);
   }
   // volumen final: el tuyo × el que marca el estudio, y la música baja mientras el estudio habla
   function applyVolumes() {
     if (!ctx || !retGain) return;
-    const v = +$('vol').value, t = ctx.currentTime;
-    const fast = ultraProgActive();
+    const v = +$('vol').value, t = ctx.currentTime, pv = v * progVol * (duck ? 0.25 : 1);
+    // Sin auriculares: el retorno y el talkback suenan por los elementos de audio de la llamada, que es lo que
+    // el cancelador de eco del navegador conoce y resta del micro. (Sin retardo ni vía rápida en este modo.)
+    const aec = !S.phones;
+    const pe = $('progEl'), te = $('talkEl');
+    pe.muted = !aec; te.muted = !aec;
+    if (aec) { pe.volume = Math.min(1, pv); te.volume = Math.min(1, v); }
+    const fast = !aec && ultraProgActive();
     // si llega el master por la vía rápida, suena esa; si no, la normal
-    selN.gain.setTargetAtTime(fast ? 0 : 1, t, 0.01);
-    selF.gain.setTargetAtTime(fast ? 1 : 0, t, 0.01);
-    retGain.gain.setTargetAtTime(v * progVol * (duck ? 0.25 : 1), t, 0.02);
-    talkOut.gain.setTargetAtTime(v, t, 0.02);
+    selN.gain.setTargetAtTime(aec ? 0 : fast ? 0 : 1, t, 0.01);
+    selF.gain.setTargetAtTime(aec ? 0 : fast ? 1 : 0, t, 0.01);
+    retGain.gain.setTargetAtTime(pv, t, 0.02);
+    talkOut.gain.setTargetAtTime(aec ? 0 : v, t, 0.02);
   }
 
   // ================= MODO LATENCIA ULTRABAJA =================
@@ -244,7 +251,9 @@
   }
 
   async function openMicStream(m) {
-    const c = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: { ideal: 2 }, sampleRate: 48000, latency: 0 };
+    // Sin auriculares el micro recoge lo que suena por el altavoz y el estudio lo oiría doble (y en bucle):
+    // entonces se activa la cancelación de eco del dispositivo. Con auriculares, micro limpio sin procesar.
+    const c = { echoCancellation: !S.phones, noiseSuppression: false, autoGainControl: false, channelCount: { ideal: S.phones ? 2 : 1 }, sampleRate: 48000, latency: 0 };
     if (m.deviceId && m.deviceId !== 'default') c.deviceId = { exact: m.deviceId };
     return navigator.mediaDevices.getUserMedia({ audio: c });
   }
@@ -497,7 +506,7 @@
   // ---------- estadísticas para el estudio ----------
   let jbPrev = { d: 0, c: 0 };
   setInterval(async () => {
-    if (!pc || !connected) return;
+    if (!pc || !connected) { send({ t: 'ping' }); return; } // el estudio sabe que seguimos aquí
     try {
       const st = await pc.getStats(); let jbMs = 0, rtt = 0;
       st.forEach(r => {
@@ -573,8 +582,18 @@
   $('vol').oninput = applyVolumes;
   // escucha directa y retardo del retorno
   const rdTxt = () => { $('rdTxt').textContent = S.retDelay + ' ms'; };
-  $('selfMon').checked = !!S.selfMon; $('monVol').value = S.monVol; $('retDelay').value = S.retDelay; rdTxt();
-  $('selfMon').onchange = () => { audioCtx(); S.selfMon = $('selfMon').checked; save(); applyMon(); };
+  const phonesUi = () => {
+    $('phones').checked = !!S.phones;
+    $('selfMon').disabled = !S.phones; if (!S.phones) $('selfMon').checked = false;
+    $('phonesHint').classList.toggle('hidden', !!S.phones);
+  };
+  $('selfMon').checked = !!S.selfMon; $('monVol').value = S.monVol; $('retDelay').value = S.retDelay; rdTxt(); phonesUi();
+  $('selfMon').onchange = () => { audioCtx(); S.selfMon = $('selfMon').checked && !!S.phones; save(); applyMon(); };
+  $('phones').onchange = async () => {
+    S.phones = $('phones').checked; if (!S.phones) S.selfMon = false;
+    save(); phonesUi(); if (ctx) { applyMon(); applyVolumes(); }
+    for (const m of mics) { try { await buildMic(m); } catch (e) { toast('No se pudo abrir el micrófono: ' + e.name); } }
+  };
   $('monVol').oninput = () => { audioCtx(); S.monVol = +$('monVol').value; save(); applyMon(); };
   $('retDelay').oninput = () => { audioCtx(); setRetDelay($('retDelay').value); save(); rdTxt(); };
   $('rdZero').onclick = () => { $('retDelay').value = 0; $('retDelay').oninput(); };
