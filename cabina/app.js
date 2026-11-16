@@ -93,6 +93,8 @@
     const pe = $('progEl'), te = $('talkEl');
     pe.muted = !aec; te.muted = !aec;
     if (aec) { pe.volume = Math.min(1, pv); te.volume = Math.min(1, v); }
+    // en el móvil, quitar el silencio a un audio puede dejarlo en pausa: se vuelve a lanzar
+    for (const el of [pe, te]) if (el.srcObject && el.paused) el.play().catch(() => needTap());
     const fast = !aec && ultraProgActive();
     // si llega el master por la vía rápida, suena esa; si no, la normal
     selN.gain.setTargetAtTime(aec ? 0 : fast ? 0 : 1, t, 0.01);
@@ -408,7 +410,7 @@
       if (e.transceiver === talkTr) {
         try { e.receiver.jitterBufferTarget = 20; } catch (x) { }
         const st = new MediaStream([e.track]);
-        const el = $('talkEl'); el.muted = true; el.srcObject = st; el.play().catch(() => { }); // para que fluya a WebAudio
+        const el = $('talkEl'); el.muted = !!S.phones; el.srcObject = st; el.play().catch(() => needTap()); // también hace fluir la pista a WebAudio
         const c = audioCtx();
         try { talkSrc && talkSrc.disconnect(); } catch (x) { }
         talkSrc = c.createMediaStreamSource(st); talkSrc.connect(talkOut);
@@ -419,7 +421,7 @@
       jb.target = JB_MIN; jb.clean = 0; jb.prev = null; setJb(e.receiver); // empieza en 20 ms; sube solo si hay cortes
       progStream = new MediaStream([e.track]);
       // el elemento solo hace fluir la pista; lo que suena sale de la mezcla Web Audio
-      const a = $('progEl'); a.muted = true; a.srcObject = progStream; a.play().catch(() => { });
+      const a = $('progEl'); a.muted = !!S.phones; a.srcObject = progStream; a.play().catch(() => needTap());
       const c = audioCtx();
       try { progSrc && progSrc.disconnect(); } catch (x) { }
       progSrc = c.createMediaStreamSource(progStream);
@@ -607,7 +609,13 @@
   $('retDelay').oninput = () => { audioCtx(); setRetDelay($('retDelay').value); save(); rdTxt(); };
   $('rdZero').onclick = () => { $('retDelay').value = 0; $('retDelay').oninput(); };
   // los navegadores no arrancan el audio sin un toque
-  addEventListener('pointerdown', () => { if (ctx && ctx.state !== 'running') ctx.resume(); });
+  addEventListener('pointerdown', () => {
+    if (ctx && ctx.state !== 'running') ctx.resume();
+    for (const el of [$('progEl'), $('talkEl')]) if (el.srcObject && el.paused) el.play().catch(() => { });
+    $('tapBanner').classList.add('hidden');
+  });
+  // si el navegador bloquea el sonido, se pide un toque bien visible (no un aviso que desaparece)
+  function needTap() { $('tapBanner').classList.remove('hidden'); }
 
   async function loadOutputs() {
     const c = audioCtx();
