@@ -283,6 +283,14 @@
     m.chans = chans;
     fillChannels(m);
     const want = Number(m.ch);
+    // detector: un vúmetro por canal del dispositivo, para saber en cuál hay señal
+    try { m.scanSplit && m.scanSplit.disconnect(); } catch (e) { }
+    m.scanAn = [];
+    if (chans > 1) {
+      m.scanSplit = c.createChannelSplitter(chans);
+      m.src.connect(m.scanSplit);
+      for (let i = 0; i < chans; i++) { const a = c.createAnalyser(); a.fftSize = 2048; m.scanSplit.connect(a, i); m.scanAn.push(a); }
+    }
     if (m.ch === 'mix' || chans < 2) { m.src.connect(m.g); m.split = null; }
     else {
       m.split = c.createChannelSplitter(chans);
@@ -306,6 +314,30 @@
   function updateSender(m) { if (m.tr && !m.tr.stopped) m.tr.sender.replaceTrack(sendTrack(m)).catch(() => { }); }
 
   function micLabel(i) { return 'Micrófono ' + (i + 1); }
+
+  // ¿En qué canales del dispositivo hay señal? (se recuerda 3 s para no parpadear)
+  const scanBuf = new Float32Array(2048);
+  function activeChannels(m) {
+    if (!m.scanAn || !m.scanAn.length) return [];
+    const now = performance.now(); m.lastAct = m.lastAct || [];
+    m.scanAn.forEach((a, i) => {
+      a.getFloatTimeDomainData(scanBuf);
+      let pk = 0; for (let k = 0; k < scanBuf.length; k++) { const v = Math.abs(scanBuf[k]); if (v > pk) pk = v; }
+      if (pk > 0.004) m.lastAct[i] = now; // > -48 dB
+    });
+    const out = []; m.lastAct.forEach((t, i) => { if (t && now - t < 3000) out.push(i + 1); });
+    return out;
+  }
+  setInterval(() => {
+    mics.forEach(m => {
+      if (!m.el || !m.chans || m.chans < 2) return;
+      const act = activeChannels(m); m.act = act;
+      const el = m.el.querySelector('.mchact');
+      const sel = m.ch === 'mix' ? null : Number(m.ch) + 1;
+      el.textContent = act.length ? `Hay señal en: ${act.map(n => 'Canal ' + n).join(', ')}` + (sel && !act.includes(sel) ? ` · el canal elegido (${sel}) está en silencio` : '') : 'Ningún canal tiene señal ahora mismo: habla o toca para probar.';
+      el.classList.toggle('warnc', !!(sel && !act.includes(sel)));
+    });
+  }, 150);
 
   // La lista de canales sale de los que da de verdad el dispositivo
   function fillChannels(m) {
@@ -553,7 +585,8 @@
         lv: progAn ? Math.round(CR.peakDb(progAn)) : null,
         ctx: ctx ? ctx.state : 'sin crear',
         pe: !pe.srcObject ? 'sin pista' : pe.paused ? 'EN PAUSA' : pe.muted ? 'silenciado' : 'sonando',
-        ph: !!S.phones, fast: ultraProgActive()
+        ph: !!S.phones, fast: ultraProgActive(),
+        mics: mics.map(m => ({ n: m.name, ch: m.ch, chs: m.chans || 1, lv: m.an ? Math.round(CR.peakDb(m.an)) : null, act: m.act || [] }))
       };
       diagPrev = inB;
       send({ t: 'lat', jb: Math.round(jbMs), out: Math.round(out), rtt: Math.round(rtt), rd: S.retDelay || 0, d });

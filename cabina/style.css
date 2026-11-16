@@ -53,6 +53,8 @@ button.danger { color: var(--accent); }
 .mic .row + .row { margin-top: 8px; }
 .mic .mch { width: auto; }
 .mic .mgain { width: 120px; }
+.mchact { color: var(--ok); margin-top: 4px; }
+.mchact.warnc { color: var(--warn); }
 input.mini { width: 120px; margin-top: 0; }
 .mic.muted .meter i { background: var(--muted); }
 .banner { background: rgba(245,185,66,.12); border: 1px solid var(--warn); color: var(--warn); border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; font-weight: 600; }
