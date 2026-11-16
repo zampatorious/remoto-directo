@@ -255,7 +255,10 @@
   async function openMicStream(m) {
     // Sin auriculares el micro recoge lo que suena por el altavoz y el estudio lo oiría doble (y en bucle):
     // entonces se activa la cancelación de eco del dispositivo. Con auriculares, micro limpio sin procesar.
-    const c = { echoCancellation: !S.phones, noiseSuppression: false, autoGainControl: false, channelCount: { ideal: S.phones ? 2 : 1 }, sampleRate: 48000, latency: 0 };
+    // Si se elige un canal concreto (tarjetas y mesas de varias entradas: X Air, Focusrite…), el micro se abre en
+    // crudo con todos sus canales: la cancelación de eco lo convertiría en mono y se perderían los canales.
+    const raw = S.phones || m.ch !== 'mix';
+    const c = { echoCancellation: !raw, noiseSuppression: false, autoGainControl: false, channelCount: { ideal: raw ? 32 : 1 }, sampleRate: 48000, latency: 0 };
     if (m.deviceId && m.deviceId !== 'default') c.deviceId = { exact: m.deviceId };
     return navigator.mediaDevices.getUserMedia({ audio: c });
   }
@@ -274,10 +277,18 @@
     try { m.src && m.src.disconnect(); m.split && m.split.disconnect(); } catch (e) { }
     m.stream = await openMicStream(m);
     const t = m.stream.getAudioTracks()[0];
-    const chans = (t.getSettings && t.getSettings().channelCount) || 1;
+    let chans = (t.getSettings && t.getSettings().channelCount) || 1;
     m.src = c.createMediaStreamSource(m.stream);
+    chans = Math.max(chans, m.src.channelCount || 1);
+    m.chans = chans;
+    fillChannels(m);
+    const want = Number(m.ch);
     if (m.ch === 'mix' || chans < 2) { m.src.connect(m.g); m.split = null; }
-    else { m.split = c.createChannelSplitter(2); m.src.connect(m.split); m.split.connect(m.g, Number(m.ch) || 0); }
+    else {
+      m.split = c.createChannelSplitter(chans);
+      m.src.channelCountMode = 'explicit'; m.src.channelCount = chans; m.src.channelInterpretation = 'discrete';
+      m.src.connect(m.split); m.split.connect(m.g, Math.min(want || 0, chans - 1));
+    }
     m.g.gain.value = m.muted ? 0 : m.gain;
     m.raw = t;
     try { t.contentHint = 'music'; } catch (e) { }
@@ -295,6 +306,19 @@
   function updateSender(m) { if (m.tr && !m.tr.stopped) m.tr.sender.replaceTrack(sendTrack(m)).catch(() => { }); }
 
   function micLabel(i) { return 'Micrófono ' + (i + 1); }
+
+  // La lista de canales sale de los que da de verdad el dispositivo
+  function fillChannels(m) {
+    if (!m.el) return;
+    const sel = m.el.querySelector('.mch');
+    const n = Math.max(2, m.chans || 2);
+    let h = '<option value="mix">Mono (todo)</option>';
+    for (let i = 0; i < n; i++) h += `<option value="${i}">Canal ${i + 1}</option>`;
+    if (sel.dataset.n !== String(n)) { sel.innerHTML = h; sel.dataset.n = String(n); }
+    sel.value = m.ch; if (sel.value !== String(m.ch)) sel.value = 'mix';
+    const info = m.el.querySelector('.mchinfo');
+    if (info) info.textContent = m.chans > 1 ? `Este dispositivo da ${m.chans} canales.` + (m.chans <= 2 ? ' Si tu mesa o tarjeta tiene más entradas, puede que aparezcan como otro dispositivo en la lista (por ejemplo «3-4»).' : '') : (m.ch === 'mix' && !S.phones ? 'Para elegir un canal concreto, elígelo en la lista: se abrirá sin procesar.' : '');
+  }
 
   async function addMic(cfg) {
     const m = Object.assign({ id: CR.randomToken(6), name: micLabel(mics.length), deviceId: 'default', ch: 'mix', gain: 1, muted: false }, cfg || {});
