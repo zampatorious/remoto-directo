@@ -29,7 +29,9 @@
   //   talkback ─► talkOut ──────────────────────────────────────────────┘
   let outBus = null, outMs = null, retDelayN = null, retDelayF = null, selN = null, selF = null, retSum = null, retGain = null, retComp = null;
   if (S.retDelay == null) S.retDelay = 0;
-  if (S.selfMon == null) S.selfMon = true;
+  // escucha directa APAGADA por defecto: si el «Enviar» está en el master, la voz ya vuelve en el retorno
+  // (se oiría doble) y sin auriculares el micro recogería el altavoz. Se activa a mano.
+  if (S.monV !== 2) { S.selfMon = false; S.monV = 2; }
   if (S.monVol == null) S.monVol = 1;
 
   function buildGraph(c) {
