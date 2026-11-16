@@ -506,12 +506,13 @@
   }
 
   // ---------- estadísticas para el estudio ----------
-  let jbPrev = { d: 0, c: 0 };
+  let jbPrev = { d: 0, c: 0 }, diagPrev = null;
   setInterval(async () => {
     if (!pc || !connected) { send({ t: 'ping' }); return; } // el estudio sabe que seguimos aquí
     try {
-      const st = await pc.getStats(); let jbMs = 0, rtt = 0;
+      const st = await pc.getStats(); let jbMs = 0, rtt = 0, inB = null;
       st.forEach(r => {
+        if (r.type === 'inbound-rtp' && r.kind === 'audio' && progTr && r.mid === progTr.mid) inB = r.bytesReceived || 0;
         if (r.type === 'inbound-rtp' && r.kind === 'audio' && r.jitterBufferEmittedCount && progTr && r.mid === progTr.mid) {
           const dd = r.jitterBufferDelay - jbPrev.d, dc = r.jitterBufferEmittedCount - jbPrev.c;
           if (dc > 0) jbMs = dd / dc * 1000;
@@ -521,7 +522,17 @@
         if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') rtt = (r.currentRoundTripTime || 0) * 1000;
       });
       const out = ctx ? ((ctx.outputLatency || 0) + (ctx.baseLatency || 0)) * 1000 : 0;
-      send({ t: 'lat', jb: Math.round(jbMs), out: Math.round(out), rtt: Math.round(rtt), rd: S.retDelay || 0 });
+      // diagnóstico para el estudio: ¿llega la música?, ¿suena?
+      const pe = $('progEl');
+      const d = {
+        in: inB != null && diagPrev != null ? Math.round((inB - diagPrev) * 8 / 2000) : null,
+        lv: progAn ? Math.round(CR.peakDb(progAn)) : null,
+        ctx: ctx ? ctx.state : 'sin crear',
+        pe: !pe.srcObject ? 'sin pista' : pe.paused ? 'EN PAUSA' : pe.muted ? 'silenciado' : 'sonando',
+        ph: !!S.phones, fast: ultraProgActive()
+      };
+      diagPrev = inB;
+      send({ t: 'lat', jb: Math.round(jbMs), out: Math.round(out), rtt: Math.round(rtt), rd: S.retDelay || 0, d });
       const fast = ultraProgActive();
       // retardo aproximado de la instrumental: medio ping + búfer + paquete + salida de audio + retardo elegido
       const total = Math.round(rtt / 2 + (fast ? 10 : Math.max(jbMs, jb.target)) + (fast ? 5 : 10) + out + (S.retDelay || 0));
