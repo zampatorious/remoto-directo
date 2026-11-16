@@ -16,23 +16,87 @@
 
   // ---------- estado ----------
   let peer = null, conn = null, pc = null, progTr = null, talkTr = null, progStream = null, ctx = null;
-  let talkOut = null, tbOn = false, duck = false, progVol = 1;
+  let talkOut = null, talkSrc = null, tbOn = false, duck = false, progVol = 1;
+
+  // ================= MEZCLA LOCAL (Web Audio) =================
+  // Dos flujos separados:
+  //  · IDA: la voz limpia de cada micro sale por su propia pista WebRTC hacia Ableton (sin procesar aquí).
+  //  · VUELTA: el master procesado de Ableton llega por otra pista (o por la vía ultrarrápida).
+  // En este navegador se mezclan:
+  //   micro ─► monGain ───────────────────────────────────────────────┐   (escucha directa: no pasa por internet)
+  //   master normal ─► retDelayN ─► selN ─┐                           ├─► outBus ─► altavoz/auriculares
+  //   master rápido ─► retDelayF ─► selF ─┴► retSum ─► retGain ─► retComp ┘
+  //   talkback ─► talkOut ──────────────────────────────────────────────┘
+  let outBus = null, outMs = null, retDelayN = null, retDelayF = null, selN = null, selF = null, retSum = null, retGain = null, retComp = null;
+  if (S.retDelay == null) S.retDelay = 0;
+  if (S.selfMon == null) S.selfMon = true;
+  if (S.monVol == null) S.monVol = 1;
+
+  function buildGraph(c) {
+    outBus = c.createGain();
+    // escucha directa del propio micro (latencia cero de red)
+    monGain = c.createGain(); monGain.gain.value = S.selfMon ? S.monVol : 0; monGain.connect(outBus);
+    // retorno del master: un retardo por vía (normal / rápida) para no mezclar sus tiempos al medir
+    retDelayN = c.createDelay(1); retDelayF = c.createDelay(1);
+    selN = c.createGain(); selF = c.createGain(); selF.gain.value = 0;
+    retDelayN.connect(selN); retDelayF.connect(selF);
+    retSum = c.createGain(); selN.connect(retSum); selF.connect(retSum);
+    progAn = c.createAnalyser(); progAn.fftSize = 1024; retSum.connect(progAn);
+    retGain = c.createGain();
+    retComp = c.createDynamicsCompressor(); // limita el retorno para que no sature
+    retComp.threshold.value = -3; retComp.knee.value = 3; retComp.ratio.value = 20;
+    retComp.attack.value = 0.001; retComp.release.value = 0.12;
+    retSum.connect(retGain); retGain.connect(retComp); retComp.connect(outBus);
+    talkOut = c.createGain(); talkOut.connect(outBus);
+    setRetDelay(S.retDelay, true);
+    routeOut();
+  }
+  function setRetDelay(ms, now) {
+    ms = Math.max(0, Math.min(1000, Math.round(+ms || 0)));
+    S.retDelay = ms;
+    if (!retDelayN) return;
+    const s = ms / 1000;
+    if (now) { retDelayN.delayTime.value = s; retDelayF.delayTime.value = s; }
+    else { retDelayN.delayTime.setTargetAtTime(s, ctx.currentTime, 0.03); retDelayF.delayTime.setTargetAtTime(s, ctx.currentTime, 0.03); }
+  }
+  // Salida elegida: directamente desde el AudioContext si el navegador lo permite;
+  // si no, por un elemento <audio> (solo cuando se elige una salida que no es la predeterminada).
+  function routeOut() {
+    if (!outBus) return;
+    const dev = S.outDev && S.outDev !== 'default' ? S.outDev : '';
+    const a = $('prog');
+    try { outBus.disconnect(); } catch (e) { }
+    if (!dev || ctx.setSinkId) {
+      outBus.connect(ctx.destination);
+      if (ctx.setSinkId && (dev || ctx.sinkId)) ctx.setSinkId(dev).catch(() => { });
+      a.srcObject = null;
+    } else {
+      if (!outMs) outMs = ctx.createMediaStreamDestination();
+      outBus.connect(outMs);
+      a.srcObject = outMs.stream; a.setSinkId(dev).catch(() => { }); a.play().catch(() => { });
+    }
+  }
+  function applyMon() {
+    if (!monGain) return;
+    monGain.gain.setTargetAtTime(S.selfMon ? S.monVol : 0, ctx.currentTime, 0.01);
+  }
   // volumen final: el tuyo × el que marca el estudio, y la música baja mientras el estudio habla
   function applyVolumes() {
-    const v = +$('vol').value;
-    const pv = Math.min(1, v * progVol * (duck ? 0.25 : 1));
+    if (!ctx || !retGain) return;
+    const v = +$('vol').value, t = ctx.currentTime;
     const fast = ultraProgActive();
     // si llega el master por la vía rápida, suena esa; si no, la normal
-    $('prog').volume = fast ? 0 : pv;
-    if (plyOut && ctx) plyOut.gain.setTargetAtTime(fast ? pv : 0, ctx.currentTime, 0.02);
-    if (talkOut && ctx) talkOut.gain.setTargetAtTime(v, ctx.currentTime, 0.02);
+    selN.gain.setTargetAtTime(fast ? 0 : 1, t, 0.01);
+    selF.gain.setTargetAtTime(fast ? 1 : 0, t, 0.01);
+    retGain.gain.setTargetAtTime(v * progVol * (duck ? 0.25 : 1), t, 0.02);
+    talkOut.gain.setTargetAtTime(v, t, 0.02);
   }
 
   // ================= MODO LATENCIA ULTRABAJA =================
   // Opus en paquetes de 5 ms por un canal directo sin reintentos (sin el búfer fijo de las llamadas).
   // La vía normal sigue funcionando en paralelo como respaldo.
   const ULTRA_US = 5000;
-  let ultraOn = false, ultraOk = null, ultraDc = null, ultraMod = null, ply = null, plyOut = null, sinkZero = null;
+  let ultraOn = false, ultraOk = null, ultraDc = null, ultraMod = null, ply = null, sinkZero = null;
   let progDec = null, progSeqLast = -1, lastUltraProg = 0;
   const CLIENT_WORKLETS = `
     class Ply extends AudioWorkletProcessor {
@@ -76,9 +140,8 @@
     await ultraMod;
     if (!ply) {
       ply = new AudioWorkletNode(c, 'cr-ply', { numberOfInputs: 0, outputChannelCount: [2] });
-      plyOut = c.createGain(); plyOut.gain.value = 0; ply.connect(plyOut); plyOut.connect(c.destination);
+      ply.connect(retDelayF); // entra en la mezcla local del retorno
       sinkZero = c.createGain(); sinkZero.gain.value = 0; sinkZero.connect(c.destination);
-      if (progAn) ply.connect(progAn);
     }
   }
   async function setupMicUltra(m) {
@@ -146,7 +209,7 @@
     try { progDec.decode(new EncodedAudioChunk({ type: 'key', timestamp: seq * ULTRA_US, data: b.subarray(8) })); } catch (e) { }
   }
   function ultraProgActive() { return performance.now() - lastUltraProg < 400; }
-  setInterval(() => { if (plyOut) applyVolumes(); }, 300); // vuelve a la vía normal si deja de llegar
+  setInterval(() => { if (ply) applyVolumes(); }, 300); // vuelve a la vía normal si deja de llegar
   async function setUltra(on) {
     await checkUltra();
     ultraOn = !!on && ultraOk;
@@ -167,7 +230,7 @@
   function audioCtx() {
     if (!ctx) {
       ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 0, sampleRate: 48000 });
-      monGain = ctx.createGain(); monGain.gain.value = 0; monGain.connect(ctx.destination);
+      buildGraph(ctx);
     }
     if (ctx.state === 'suspended') ctx.resume();
     return ctx;
@@ -336,22 +399,22 @@
         const st = new MediaStream([e.track]);
         const el = $('talkEl'); el.muted = true; el.srcObject = st; el.play().catch(() => { }); // para que fluya a WebAudio
         const c = audioCtx();
-        if (!talkOut) { talkOut = c.createGain(); talkOut.connect(c.destination); }
-        c.createMediaStreamSource(st).connect(talkOut);
+        try { talkSrc && talkSrc.disconnect(); } catch (x) { }
+        talkSrc = c.createMediaStreamSource(st); talkSrc.connect(talkOut);
         applyVolumes();
         return;
       }
       if (e.transceiver !== progTr) return;
-      try { e.receiver.jitterBufferTarget = S.buf != null ? S.buf : 0; } catch (x) { } // mínimo que permita la red
+      jb.target = JB_MIN; jb.clean = 0; jb.prev = null; setJb(e.receiver); // empieza en 20 ms; sube solo si hay cortes
       progStream = new MediaStream([e.track]);
-      const a = $('prog'); a.srcObject = progStream; a.volume = +$('vol').value;
-      if (S.outDev && a.setSinkId) a.setSinkId(S.outDev).catch(() => { });
-      a.play().catch(() => toast('Toca la pantalla para activar el sonido'));
-      // para el vúmetro y la calibración
+      // el elemento solo hace fluir la pista; lo que suena sale de la mezcla Web Audio
+      const a = $('progEl'); a.muted = true; a.srcObject = progStream; a.play().catch(() => { });
       const c = audioCtx();
+      try { progSrc && progSrc.disconnect(); } catch (x) { }
       progSrc = c.createMediaStreamSource(progStream);
-      progAn = c.createAnalyser(); progAn.fftSize = 1024; progSrc.connect(progAn);
-      if (ply) ply.connect(progAn);
+      progSrc.connect(retDelayN);
+      applyVolumes();
+      if (c.state !== 'running') toast('Toca la pantalla para activar el sonido');
     };
     pc.onconnectionstatechange = () => {
       const st = pc && pc.connectionState;
@@ -367,7 +430,7 @@
     if (negotiating) { pendingNeg = true; return; }
     negotiating = true;
     try {
-      const offer = await pc.createOffer();
+      const offer = await pc.createOffer({ voiceActivityDetection: false }); // + usedtx=0 en el SDP: no corta en los silencios
       offer.sdp = CR.tuneSdp(offer.sdp);
       await pc.setLocalDescription(offer);
       send({ t: 'sdp', type: 'offer', sdp: pc.localDescription.sdp, prog: progTr.mid, talk: talkTr.mid });
@@ -396,21 +459,37 @@
     const m = mics[0]; if (!m || !progSrc) return;
     stopCal();
     try { m.g.disconnect(m.dest); } catch (e) { }
-    progSrc.connect(m.dest);
+    // se devuelve el retorno YA retrasado: así la medida incluye el retardo que haya puesto el artista
+    retDelayN.connect(m.dest);
     cal = { mic: m };
     updateSender(m); // durante la medición se envía la ruta procesada (la que lleva los clics)
     // vía rápida: lo que llega por el reproductor rápido vuelve por el canal rápido del micro 1
-    if (m.cap && ply) { try { m.g.disconnect(m.cap); } catch (e) { } ply.connect(m.cap); cal.fast = true; }
+    if (m.cap && ply) { try { m.g.disconnect(m.cap); } catch (e) { } retDelayF.connect(m.cap); cal.fast = true; }
     toast('Midiendo el retraso… (oirás unos clics)', 4000);
   }
   function stopCal() {
     if (!cal) return;
-    try { progSrc.disconnect(cal.mic.dest); } catch (e) { }
-    progSrc.connect(progAn);
+    try { retDelayN.disconnect(cal.mic.dest); } catch (e) { }
     try { cal.mic.g.connect(cal.mic.dest); } catch (e) { }
-    if (cal.fast && cal.mic.cap) { try { ply.disconnect(cal.mic.cap); } catch (e) { } try { cal.mic.g.connect(cal.mic.cap); } catch (e) { } }
+    if (cal.fast && cal.mic.cap) { try { retDelayF.disconnect(cal.mic.cap); } catch (e) { } try { cal.mic.g.connect(cal.mic.cap); } catch (e) { } }
     const m = cal.mic; cal = null;
     updateSender(m);
+  }
+
+  // ---------- búfer de la instrumental: lo más bajo que aguante la red ----------
+  // Empieza en 20 ms. Si en 2 s se han tenido que «inventar» muestras (cortes), sube 10 ms;
+  // tras 30 s sin cortes baja 5 ms, sin pasar nunca de 20 ms hacia abajo.
+  const JB_MIN = 20, JB_MAX = 200;
+  const jb = { target: JB_MIN, clean: 0, prev: null };
+  function setJb(rx) { try { (rx || (progTr && progTr.receiver)).jitterBufferTarget = jb.target; } catch (e) { } }
+  function adaptJb(r) {
+    const cur = { conc: r.concealedSamples || 0, silent: r.silentConcealedSamples || 0, tot: r.totalSamplesReceived || 0 };
+    const p = jb.prev; jb.prev = cur;
+    if (!p || cur.tot <= p.tot) return;
+    const lost = (cur.conc - p.conc) - (cur.silent - p.silent); // muestras rellenadas por falta de paquetes
+    const ratio = lost / (cur.tot - p.tot);
+    if (ratio > 0.002) { jb.target = Math.min(JB_MAX, jb.target + 10); jb.clean = 0; setJb(); }
+    else if (++jb.clean >= 15 && jb.target > JB_MIN) { jb.target = Math.max(JB_MIN, jb.target - 5); jb.clean = 0; setJb(); }
   }
 
   // ---------- estadísticas para el estudio ----------
@@ -418,18 +497,22 @@
   setInterval(async () => {
     if (!pc || !connected) return;
     try {
-      const st = await pc.getStats(); let jb = 0, rtt = 0;
+      const st = await pc.getStats(); let jbMs = 0, rtt = 0;
       st.forEach(r => {
         if (r.type === 'inbound-rtp' && r.kind === 'audio' && r.jitterBufferEmittedCount && progTr && r.mid === progTr.mid) {
           const dd = r.jitterBufferDelay - jbPrev.d, dc = r.jitterBufferEmittedCount - jbPrev.c;
-          if (dc > 0) jb = dd / dc * 1000;
+          if (dc > 0) jbMs = dd / dc * 1000;
           jbPrev = { d: r.jitterBufferDelay, c: r.jitterBufferEmittedCount };
+          if (!ultraProgActive()) adaptJb(r); else jb.prev = null;
         }
         if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') rtt = (r.currentRoundTripTime || 0) * 1000;
       });
       const out = ctx ? ((ctx.outputLatency || 0) + (ctx.baseLatency || 0)) * 1000 : 0;
-      send({ t: 'lat', jb: Math.round(jb), out: Math.round(out), rtt: Math.round(rtt) });
-      $('lat').textContent = `ping ${Math.round(rtt)} ms`;
+      send({ t: 'lat', jb: Math.round(jbMs), out: Math.round(out), rtt: Math.round(rtt), rd: S.retDelay || 0 });
+      const fast = ultraProgActive();
+      // retardo aproximado de la instrumental: medio ping + búfer + paquete + salida de audio + retardo elegido
+      const total = Math.round(rtt / 2 + (fast ? 10 : Math.max(jbMs, jb.target)) + (fast ? 5 : 10) + out + (S.retDelay || 0));
+      $('lat').textContent = `ping ${Math.round(rtt)} ms · instrumental ≈ ${total} ms${fast ? ' ⚡' : ` · búfer ${jb.target} ms`}`;
     } catch (e) { }
   }, 2000);
 
@@ -459,7 +542,7 @@
     if (full) {
       mics.forEach(m => { m.stream && m.stream.getTracks().forEach(t => t.stop()); dropMicUltra(m); });
       mics.length = 0; $('mics').innerHTML = '';
-      $('prog').srcObject = null;
+      $('progEl').srcObject = null; $('talkEl').srcObject = null;
     }
   }
 
@@ -486,18 +569,23 @@
   $('addMic').onclick = () => addMic();
   $('leaveBtn').onclick = () => { leaving = true; send({ t: 'bye' }); setTimeout(() => fail(''), 100); setJoin('Has salido del estudio.'); };
   $('vol').oninput = applyVolumes;
-  $('selfMon').onchange = () => { audioCtx(); monGain.gain.setTargetAtTime($('selfMon').checked ? 1 : 0, ctx.currentTime, 0.01); };
+  // escucha directa y retardo del retorno
+  const rdTxt = () => { $('rdTxt').textContent = S.retDelay + ' ms'; };
+  $('selfMon').checked = !!S.selfMon; $('monVol').value = S.monVol; $('retDelay').value = S.retDelay; rdTxt();
+  $('selfMon').onchange = () => { audioCtx(); S.selfMon = $('selfMon').checked; save(); applyMon(); };
+  $('monVol').oninput = () => { audioCtx(); S.monVol = +$('monVol').value; save(); applyMon(); };
+  $('retDelay').oninput = () => { audioCtx(); setRetDelay($('retDelay').value); save(); rdTxt(); };
+  $('rdZero').onclick = () => { $('retDelay').value = 0; $('retDelay').oninput(); };
+  // los navegadores no arrancan el audio sin un toque
+  addEventListener('pointerdown', () => { if (ctx && ctx.state !== 'running') ctx.resume(); });
 
   async function loadOutputs() {
-    const a = $('prog');
-    if (!a.setSinkId) { $('outWrap').classList.add('hidden'); return; }
+    const c = audioCtx();
+    if (!c.setSinkId && !$('prog').setSinkId) { $('outWrap').classList.add('hidden'); return; }
     const { outs } = await devices();
     $('outDev').innerHTML = outs.map(d => `<option value="${d.deviceId}">${(d.label || 'Salida').replace(/</g, '&lt;')}</option>`).join('');
     if (S.outDev) $('outDev').value = S.outDev;
-    $('outDev').onchange = () => {
-      S.outDev = $('outDev').value; save(); a.setSinkId(S.outDev).catch(() => { });
-      if (ctx && ctx.setSinkId) ctx.setSinkId(S.outDev === 'default' ? '' : S.outDev).catch(() => { }); // talkback y escucha propia
-    };
+    $('outDev').onchange = () => { S.outDev = $('outDev').value; save(); routeOut(); }; // retorno, talkback y escucha propia
   }
   navigator.mediaDevices && navigator.mediaDevices.addEventListener && navigator.mediaDevices.addEventListener('devicechange', () => {
     loadOutputs();

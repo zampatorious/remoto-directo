@@ -55,7 +55,16 @@
           <select id="outDev"></select>
         </label>
       </div>
-      <label class="check"><input type="checkbox" id="selfMon"> Oír también mi voz directa (sin retraso, sin efectos)</label>
+      <div class="row">
+        <label class="grow">Retardo del retorno <b id="rdTxt">0 ms</b>
+          <input type="range" id="retDelay" min="0" max="500" step="1" value="0">
+        </label>
+        <button id="rdZero" class="ghost sm" title="Sin retardo">0</button>
+      </div>
+      <div class="row">
+        <label class="check grow"><input type="checkbox" id="selfMon" checked> Oírme en directo (mi micro, sin pasar por internet)</label>
+        <input type="range" id="monVol" class="mini" min="0" max="1.5" step="0.01" value="1" title="Volumen de mi voz">
+      </div>
     </section>
 
     <section class="card">
@@ -68,7 +77,8 @@
     </section>
   </main>
   <div id="toast" class="toast hidden"></div>
-  <audio id="prog" autoplay playsinline></audio>
+  <audio id="prog" playsinline></audio>
+  <audio id="progEl" autoplay playsinline muted></audio>
   <audio id="talkEl" autoplay playsinline muted></audio>
 </section>
 
